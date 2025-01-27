@@ -1689,6 +1689,8 @@ class AttentionLayers(Module):
         use_adaptive_layernorm = False,
         use_adaptive_rmsnorm = False,
         use_adaptive_layerscale = False, # paired with use_adaptive_layernorm for ada-ln-zero from DiT paper
+        use_adaptive_doublenorm = False, # from https://arxiv.org/html/2410.11081v1#bib.bib13
+        num_norm_groups = None, # number of groups in group norm used in adaptive_doublenorm
         norm_add_unit_offset = True,
         dim_condition = None,
         adaptive_condition_mlp = False,
@@ -1826,7 +1828,7 @@ class AttentionLayers(Module):
 
         # determine norm
 
-        assert at_most_one_of(use_scalenorm, use_rmsnorm, use_simple_rmsnorm, use_adaptive_layernorm, use_adaptive_rmsnorm), 'you can only use either scalenorm, rmsnorm, adaptive layernorm, adaptive rmsnorm, or simple rmsnorm'
+        assert at_most_one_of(use_scalenorm, use_rmsnorm, use_simple_rmsnorm, use_adaptive_layernorm, use_adaptive_rmsnorm, use_adaptive_doublenorm), 'you can only use either scalenorm, rmsnorm, adaptive layernorm, adaptive rmsnorm, simple rmsnorm or adaptive doublenorm'
 
         norm_need_condition = False
         dim_condition = default(dim_condition, dim)
@@ -1847,6 +1849,9 @@ class AttentionLayers(Module):
         elif use_adaptive_rmsnorm:
             norm_need_condition = True
             norm_class = partial(AdaptiveRMSNorm, dim_condition = dim_condition * dim_condition_mult)
+        elif use_adaptive_doublenorm:
+            norm_need_condition = True
+            norm_class = partial(AdaptiveDoubleNorm, dim_condition = dim_condition * dim_condition_mult, num_groups = num_norm_groups)
         else:
             norm_class = LayerNorm
 
@@ -2987,3 +2992,33 @@ class XTransformer(Module):
 
         out = self.decoder(tgt, context = enc, context_mask = mask)
         return out
+
+class AdaptiveDoubleNorm(nn.Module):
+    def __init__(
+        self,
+        num_channels,
+        num_groups = None,
+        dim_condition = None
+    ):
+        super().__init__()
+        if dim_condition is None:
+            dim_condition = default(num_channels)
+        if num_groups is None:
+            num_groups = 1
+        self.gn = nn.GroupNorm(num_groups, num_channels, affine=False) # affine set to false to ensure that the scaling and shifting happen from the conditional information alone
+        self.to_gamma_beta = nn.Linear(dim_condition, 2*num_channels, bias = False) # 2*num_channels because we want to split it into two parts, one for gamma and one for beta
+        self.pnorm = partial(torch.norm, p=2, dim=2, keepdim=True)
+
+
+    def forward(self, x, *, condition):
+        if condition.ndim == 2:
+            condition = rearrange(condition, 'b d -> b 1 d')
+
+        #TODO: this kind of rearranging might be slow, check if there is a better way to do this
+        x = rearrange(x, 'b t d -> b d t')  # group norm expects the channels to be the second dimension
+        normed = self.gn(x)
+        normed = rearrange(normed, 'b d t -> b t d') 
+        gamma, beta = torch.split(self.to_gamma_beta(condition), normed.shape[-1], dim = -1)
+        gamma = gamma/(self.pnorm(gamma)/normed.shape[-1] + 1e-8)
+        beta = beta/(self.pnorm(beta)/normed.shape[-1] + 1e-8)
+        return normed * gamma + beta
