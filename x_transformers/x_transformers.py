@@ -27,6 +27,9 @@ from loguru import logger
 from x_transformers.attend import Attend, Intermediates
 from x_transformers.autoregressive_wrapper import AutoregressiveWrapper
 
+import gin  # HACK to experiment the validaty of AdaptiveDoubleNorm class
+import pdb
+
 # constants
 
 DEFAULT_DIM_HEAD = 64
@@ -2992,33 +2995,53 @@ class XTransformer(Module):
 
         out = self.decoder(tgt, context = enc, context_mask = mask)
         return out
-
+@gin.configurable
 class AdaptiveDoubleNorm(nn.Module):
     def __init__(
         self,
         num_channels,
         num_groups = None,
-        dim_condition = None
+        dim_condition = None,
+        init_weights_to_zero = False,
+        pixel_norm = False,
+        set_beta_to_zero = False,
+        use_layer_norm = False
     ):
         super().__init__()
         if dim_condition is None:
             dim_condition = default(num_channels)
-        if num_groups is None:
-            num_groups = 1
-        self.gn = nn.GroupNorm(num_groups, num_channels, affine=False) # affine set to false to ensure that the scaling and shifting happen from the conditional information alone
+        
+        self.use_layer_norm = use_layer_norm
+        if not use_layer_norm:
+            if num_groups is None:
+                num_groups = 1
+            self.gn = nn.GroupNorm(num_groups, num_channels, affine=False) # affine set to false to ensure that the scaling and shifting happen from the conditional information alone
+        else:
+            self.ln = nn.LayerNorm(num_channels, elementwise_affine=False) # doesn't normalize over the time dimension
         self.to_gamma_beta = nn.Linear(dim_condition, 2*num_channels, bias = False) # 2*num_channels because we want to split it into two parts, one for gamma and one for beta
-        self.pnorm = partial(torch.norm, p=2, dim=2, keepdim=True)
+        if init_weights_to_zero:
+            nn.init.zeros_(self.to_gamma_beta.weight)
+        if pixel_norm:
+            self.pnorm = partial(torch.norm, p=2, dim=2, keepdim=True)
+        else:
+            self.pnorm = nn.Identity()
+        self.set_beta_to_zero = set_beta_to_zero
 
 
     def forward(self, x, *, condition):
         if condition.ndim == 2:
             condition = rearrange(condition, 'b d -> b 1 d')
-
-        #TODO: this kind of rearranging might be slow, check if there is a better way to do this
-        x = rearrange(x, 'b t d -> b d t')  # group norm expects the channels to be the second dimension
-        normed = self.gn(x)
-        normed = rearrange(normed, 'b d t -> b t d') 
+        if self.use_layer_norm:
+            normed = self.ln(x)
+        else:
+            #TODO: this kind of rearranging might be slow, check if there is a better way to do this
+            x = rearrange(x, 'b t d -> b d t')  # group norm expects the channels to be the second dimension
+            normed = self.gn(x)
+            normed = rearrange(normed, 'b d t -> b t d') 
         gamma, beta = torch.split(self.to_gamma_beta(condition), normed.shape[-1], dim = -1)
         gamma = gamma/(self.pnorm(gamma)/normed.shape[-1] + 1e-8)
-        beta = beta/(self.pnorm(beta)/normed.shape[-1] + 1e-8)
-        return normed * gamma + beta
+        if self.set_beta_to_zero:
+            beta = torch.zeros_like(beta)
+        else:
+            beta = beta/(self.pnorm(beta)/normed.shape[-1] + 1e-8)
+        return normed * (gamma + 1.) + beta
