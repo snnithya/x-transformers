@@ -3023,8 +3023,10 @@ class AdaptiveDoubleNorm(nn.Module):
             nn.init.zeros_(self.to_gamma_beta.weight)
         if pixel_norm:
             self.pnorm = partial(torch.norm, p=2, dim=2, keepdim=True)
+            self.pixel_norm = True
         else:
-            self.pnorm = nn.Identity()
+            self.pixel_norm = False
+
         self.set_beta_to_zero = set_beta_to_zero
 
 
@@ -3039,9 +3041,11 @@ class AdaptiveDoubleNorm(nn.Module):
             normed = self.gn(x)
             normed = rearrange(normed, 'b d t -> b t d') 
         gamma, beta = torch.split(self.to_gamma_beta(condition), normed.shape[-1], dim = -1)
-        gamma = gamma/(self.pnorm(gamma)/normed.shape[-1] + 1e-8)
+        if self.pixel_norm:
+            gamma = gamma/(self.pnorm(gamma)/normed.shape[-1] + 1e-8)
         if self.set_beta_to_zero:
             beta = torch.zeros_like(beta)
         else:
-            beta = beta/(self.pnorm(beta)/normed.shape[-1] + 1e-8)
+            if self.pixel_norm:
+                beta = beta/(self.pnorm(beta)/normed.shape[-1] + 1e-8)
         return normed * (gamma + 1.) + beta
