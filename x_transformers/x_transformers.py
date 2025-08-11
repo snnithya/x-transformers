@@ -306,7 +306,7 @@ class ScaledSinusoidalEmbedding(Module):
         if exists(seq_start_pos):
             pos = pos - seq_start_pos[..., None]
 
-        emb = einsum('i, j -> i j', pos, self.inv_freq)
+        emb = einsum('i, j -> i j', pos, self.inv_freq.to(device))
         emb = torch.cat((emb.sin(), emb.cos()), dim = -1)
         return emb * self.scale
 
