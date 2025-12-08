@@ -2111,9 +2111,9 @@ class AttentionLayers(Module):
         # handle condition
 
         if exists(condition):
-            assert condition.shape[-1] == self.dim_condition, f'expected condition dimension of {self.dim_condition} but received {condition.shape[-1]}'
+            # assert condition.shape[-1] == self.dim_condition, f'expected condition dimension of {self.dim_condition} but received {condition.shape[-1]}'
 
-            assert condition.ndim in {2, 3}
+            # assert condition.ndim in {2, 3}
 
             if condition.ndim == 2:
                 condition = rearrange(condition, 'b d -> b 1 d')
@@ -2283,9 +2283,9 @@ class AttentionLayers(Module):
             pre_norm, post_branch_norm, post_main_norm = norm
 
             if self.need_condition:
-                pre_norm = maybe(partial)(pre_norm, **norm_kwargs)
-                post_branch_norm = maybe(partial)(post_branch_norm, **norm_kwargs)
-                post_main_norm = maybe(partial)(post_main_norm, **norm_kwargs)
+                pre_norm = maybe(partial)(pre_norm, condition=condition)
+                post_branch_norm = maybe(partial)(post_branch_norm, condition=condition)
+                post_main_norm = maybe(partial)(post_main_norm, condition=condition)
 
             if self.reinject_input:
                 x = x + inp_inject
@@ -2296,7 +2296,7 @@ class AttentionLayers(Module):
                 if layer_type == 'a' and exists(layer_mem):
                     layer_mem = pre_norm(layer_mem)
 
-            block = partial(block, **block_forward_kwargs)
+            block = partial(block, condition=condition)
 
             # handle maybe value residuals
 
@@ -2315,7 +2315,7 @@ class AttentionLayers(Module):
             if layer_type == 'a':
                 out, inter = block(x, mask = mask, context_mask = self_attn_kv_mask, attn_mask = attn_mask, rel_pos = self.rel_pos, pos = pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, cache = next(iter_attn_cache, None), mem = layer_mem, mem_mask = layer_mem_mask, attn_bias = attn_bias, value_residual = maybe_self_attn_value_residual, return_intermediates = True)
             elif layer_type == 'c':
-                out, inter = block(x, context = context, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn, cache = next(iter_attn_cache, None), value_residual = maybe_cross_attn_value_residual, **cross_attn_rotary_pos_emb, return_intermediates = True)
+                out, inter = block(x, context = context, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn, cache = next(iter_attn_cache, None), value_residual = maybe_cross_attn_value_residual, return_intermediates = True, rotary_pos_emb = rotary_pos_emb, context_rotary_pos_emb = context_rotary_pos_emb)
             elif layer_type == 'f':
                 out = block(x)
 
